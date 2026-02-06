@@ -332,37 +332,52 @@ def record_tab():
     with col2:
         st.subheader("カテゴリー")
         
-        # Inject custom CSS for category buttons
-        css_blocks = []
-        for i, cat in enumerate(categories):
-            # Sanitize name for CSS class (simple hex hash for safety with Japanese)
-            safe_name = f"cat-btn-{i}" 
-            css_blocks.append(f"""
-                div.{safe_name} button {{
-                    background-color: {cat['color']} !important;
+        # Define the exact colors requested by the user
+        color_data = {
+            "社内": "#E25D33",
+            "全社関連": "#4351AF",
+            "社外": "#397E49",
+            "研修": "#5EB47E",
+            "問い合わせ関連作業": "#EEC14C",
+            "受講者メール等個別対応": "#832DA4",
+            "対面訪問": "#C3291C",
+            "レポート送付": "#616161",
+            "初動関連": "#D88277",
+            "デフォルト": "#4599DF"
+        }
+
+        # Inject robust CSS using the marker strategy
+        css_lines = []
+        for idx, cat in enumerate(categories):
+            c_code = color_data.get(cat['name'], cat['color'])
+            css_lines.append(f"""
+                div[data-testid="stVerticalBlock"]:has(span#btn-marker-{idx}) button {{
+                    background-color: {c_code} !important;
                     color: white !important;
                     border: none !important;
                     height: 50px !important;
+                    width: 100% !important;
                 }}
-                div.{safe_name} button:hover {{
-                    filter: brightness(0.85) !important;
-                    box-shadow: 0 4px 8px rgba(0,0,0,0.2) !important;
+                div[data-testid="stVerticalBlock"]:has(span#btn-marker-{idx}) button:hover {{
+                    filter: brightness(0.8) !important;
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
                 }}
-                div.{safe_name} button:active {{
-                    transform: scale(0.98) !important;
+                div[data-testid="stVerticalBlock"]:has(span#btn-marker-{idx}) button p {{
+                    color: white !important;
+                    font-weight: 700 !important;
                 }}
             """)
         
-        st.markdown(f"<style>{''.join(css_blocks)}</style>", unsafe_allow_html=True)
+        st.markdown(f"<style>{''.join(css_lines)}</style>", unsafe_allow_html=True)
 
         cols = st.columns(2)
         for idx, cat in enumerate(categories):
             with cols[idx % 2]:
-                # Use wrap div with unique class for targeting
-                st.markdown(f'<div class="cat-btn-{idx}">', unsafe_allow_html=True)
-                if st.button(f"{cat['name']}", key=f"cat_{idx}", use_container_width=True):
-                    st.session_state.selected_cat_idx = idx
-                st.markdown('</div>', unsafe_allow_html=True)
+                # Wrap each button in a container with a hidden marker
+                with st.container():
+                    st.markdown(f'<span id="btn-marker-{idx}"></span>', unsafe_allow_html=True)
+                    if st.button(f"{cat['name']}", key=f"cat_{idx}", use_container_width=True):
+                        st.session_state.selected_cat_idx = idx
         
         if 'selected_cat_idx' in st.session_state:
             selected_cat = categories[st.session_state.selected_cat_idx]
