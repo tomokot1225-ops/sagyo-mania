@@ -332,8 +332,8 @@ def record_tab():
     with col2:
         st.subheader("カテゴリー")
         
-        # Define the exact colors requested by the user
-        color_data = {
+        # Exact colors as requested
+        color_config = {
             "社内": "#E25D33",
             "全社関連": "#4351AF",
             "社外": "#397E49",
@@ -346,25 +346,43 @@ def record_tab():
             "デフォルト": "#4599DF"
         }
 
-        # Inject robust CSS using the marker strategy
+        # CSS for minimalist buttons with colored dots
         css_lines = []
         for idx, cat in enumerate(categories):
-            c_code = color_data.get(cat['name'], cat['color'])
+            dot_color = color_config.get(cat['name'], cat['color'])
+            sub_col_idx = (idx % 2) + 1
+            row_idx = (idx // 2) + 1
+            selector = f'div[data-testid="column"]:nth-of-type(2) div[data-testid="column"]:nth-of-type({sub_col_idx}) div[data-testid="stButton"]:nth-of-type({row_idx}) button'
+            
             css_lines.append(f"""
-                div[data-testid="stVerticalBlock"]:has(span#btn-marker-{idx}) button {{
-                    background-color: {c_code} !important;
-                    color: white !important;
-                    border: none !important;
-                    height: 50px !important;
+                {selector} {{
+                    background-color: #FFFFFF !important;
+                    color: #31333F !important;
+                    border: 1px solid #E6E9EF !important;
+                    height: 52px !important;
                     width: 100% !important;
+                    box-shadow: 0 1px 2px rgba(0,0,0,0.05) !important;
+                    text-align: left !important;
+                    padding-left: 45px !important;
+                    position: relative !important;
                 }}
-                div[data-testid="stVerticalBlock"]:has(span#btn-marker-{idx}) button:hover {{
-                    filter: brightness(0.8) !important;
-                    box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
+                {selector}::before {{
+                    content: "●" !important;
+                    position: absolute !important;
+                    left: 15px !important;
+                    top: 50% !important;
+                    transform: translateY(-50%) !important;
+                    color: {dot_color} !important;
+                    font-size: 1.2rem !important;
                 }}
-                div[data-testid="stVerticalBlock"]:has(span#btn-marker-{idx}) button p {{
-                    color: white !important;
-                    font-weight: 700 !important;
+                {selector}:hover {{
+                    background-color: #F8F9FB !important;
+                    border-color: #D1D5DB !important;
+                    box-shadow: 0 4px 6px rgba(0,0,0,0.07) !important;
+                }}
+                {selector} p {{
+                    color: #31333F !important;
+                    font-weight: 500 !important;
                 }}
             """)
         
@@ -373,11 +391,8 @@ def record_tab():
         cols = st.columns(2)
         for idx, cat in enumerate(categories):
             with cols[idx % 2]:
-                # Wrap each button in a container with a hidden marker
-                with st.container():
-                    st.markdown(f'<span id="btn-marker-{idx}"></span>', unsafe_allow_html=True)
-                    if st.button(f"{cat['name']}", key=f"cat_{idx}", use_container_width=True):
-                        st.session_state.selected_cat_idx = idx
+                if st.button(f"{cat['name']}", key=f"cat_{idx}", use_container_width=True):
+                    st.session_state.selected_cat_idx = idx
         
         if 'selected_cat_idx' in st.session_state:
             selected_cat = categories[st.session_state.selected_cat_idx]
