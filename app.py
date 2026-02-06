@@ -122,6 +122,34 @@ st.markdown("""
         box-shadow: 0 2px 4px rgba(0,0,0,0.05);
         margin-bottom: 1rem;
     }
+
+    /* Custom Category Button */
+    .cat-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        padding: 0.6rem 1rem;
+        border-radius: 8px;
+        border: 1px solid #ddd;
+        background-color: white;
+        color: #333;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        text-decoration: none;
+        margin-bottom: 0.5rem;
+    }
+    .cat-button:hover {
+        border-color: #999;
+        background-color: #f0f2f6;
+    }
+    .cat-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        margin-right: 8px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -155,6 +183,13 @@ def save_log(entry):
         INSERT INTO work_logs (timestamp, category, sub_category, duration_min, memo, source, event_id)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     ''', (entry["Date"], entry["Category"], entry["SubCategory"], entry["Duration"], entry["Memo"], entry["Source"], entry.get("EventID")))
+    conn.commit()
+    conn.close()
+
+def update_last_memo(timestamp, memo):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('UPDATE work_logs SET memo = ? WHERE timestamp = ?', (memo, timestamp))
     conn.commit()
     conn.close()
 
@@ -215,37 +250,60 @@ def record_tab():
             st.progress(min(int(st.session_state.elapsed_seconds % 60) / 60, 1.0))
             st.caption(f"計測中: {st.session_state.current_category} / {st.session_state.current_sub_category}")
             if st.button("⏹️ 終了して保存", type="primary", use_container_width=True):
+                # Save immediately with empty memo
+                entry = {
+                    "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "Category": st.session_state.current_category,
+                    "SubCategory": st.session_state.current_sub_category,
+                    "Duration": round(st.session_state.elapsed_seconds / 60, 2),
+                    "Memo": "",
+                    "Source": "Manual"
+                }
+                save_log(entry)
+                
+                # Update states
                 st.session_state.timer_running = False
-                st.session_state.needs_save = True
+                st.session_state.last_timestamp = entry["Date"]
+                st.session_state.show_memo_input = True
+                st.session_state.elapsed_seconds = 0
+                st.rerun()
         else:
             st.info("カテゴリーを選択して計測を開始してください。")
         st.markdown('</div>', unsafe_allow_html=True)
 
-        if hasattr(st.session_state, 'needs_save') and st.session_state.needs_save:
-            with st.form("save_form"):
-                memo = st.text_input("内容（メモ）", placeholder="何を行いましたか？")
-                if st.form_submit_button("保存"):
-                    entry = {
-                        "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "Category": st.session_state.current_category,
-                        "SubCategory": st.session_state.current_sub_category,
-                        "Duration": round(st.session_state.elapsed_seconds / 60, 2),
-                        "Memo": memo,
-                        "Source": "Manual"
-                    }
-                    save_log(entry)
-                    st.success("保存しました。")
-                    st.session_state.elapsed_seconds = 0
-                    st.session_state.needs_save = False
+        if st.session_state.get('show_memo_input'):
+            st.success("✅ 保存されました（メモは任意です）")
+            with st.form("memo_form"):
+                memo = st.text_input("内容を入力（メモを追加）", placeholder="何を行いましたか？")
+                if st.form_submit_button("メモを内容に反映する"):
+                    if memo:
+                        update_last_memo(st.session_state.last_timestamp, memo)
+                        st.toast("メモを保存しました。")
+                    st.session_state.show_memo_input = False
                     st.rerun()
+            
+            if st.button("メモせず閉じる"):
+                st.session_state.show_memo_input = False
+                st.rerun()
 
     with col2:
         st.subheader("カテゴリー")
         cols = st.columns(2)
         for idx, cat in enumerate(categories):
             with cols[idx % 2]:
+                # Using a native streamlit button but with a colored circle in the label
+                # Since streamlit buttons don't support full color well, we add a color indicator
                 if st.button(f"● {cat['name']}", key=f"cat_{idx}", use_container_width=True):
                     st.session_state.selected_cat_idx = idx
+                
+                # Dynamic CSS for this button specifically
+                st.markdown(f"""
+                    <style>
+                    div[data-testid="stColumn"]:nth-child({(idx % 2) + 1}) button[key="cat_{idx}"] p {{
+                        color: {cat['color']};
+                    }}
+                    </style>
+                """, unsafe_allow_html=True)
         
         if 'selected_cat_idx' in st.session_state:
             selected_cat = categories[st.session_state.selected_cat_idx]
