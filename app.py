@@ -20,10 +20,14 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
-def init_db():
+def init_db(force=False):
     conn = get_db_connection()
     cursor = conn.cursor()
     
+    if force:
+        cursor.execute('DELETE FROM sub_categories')
+        cursor.execute('DELETE FROM categories')
+
     # Logs Table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS work_logs (
@@ -123,32 +127,15 @@ st.markdown("""
         margin-bottom: 1rem;
     }
 
-    /* Custom Category Button */
-    .cat-button {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 100%;
-        padding: 0.6rem 1rem;
-        border-radius: 8px;
-        border: 1px solid #ddd;
-        background-color: white;
-        color: #333;
-        font-weight: 600;
-        cursor: pointer;
-        transition: all 0.2s ease;
-        text-decoration: none;
-        margin-bottom: 0.5rem;
+    /* Custom Category Marker */
+    .cat-marker {
+        border-left: 6px solid #ccc;
+        padding-left: 0px;
+        margin-bottom: 15px;
+        transition: all 0.3s ease;
     }
-    .cat-button:hover {
-        border-color: #999;
-        background-color: #f0f2f6;
-    }
-    .cat-dot {
-        width: 10px;
-        height: 10px;
-        border-radius: 50%;
-        margin-right: 8px;
+    .cat-marker:hover {
+        padding-left: 5px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -198,6 +185,24 @@ def load_logs():
     df = pd.read_sql_query('SELECT * FROM work_logs ORDER BY timestamp DESC', conn)
     conn.close()
     return df
+
+def delete_log(log_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM work_logs WHERE id = ?', (log_id,))
+    conn.commit()
+    conn.close()
+
+def update_log(log_id, category, sub_category, duration, memo, timestamp):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE work_logs 
+        SET category = ?, sub_category = ?, duration_min = ?, memo = ?, timestamp = ?
+        WHERE id = ?
+    ''', (category, sub_category, duration, memo, timestamp, log_id))
+    conn.commit()
+    conn.close()
 
 def save_category_setting(name, color, subs, keywords):
     conn = get_db_connection()
@@ -286,24 +291,41 @@ def record_tab():
                 st.session_state.show_memo_input = False
                 st.rerun()
 
+        st.divider()
+        with st.expander("➕ 手動で記録を追加"):
+            with st.form("manual_add_form"):
+                m_date = st.date_input("日付", value=datetime.today())
+                m_time = st.time_input("開始時刻", value=datetime.now().time())
+                m_cat = st.selectbox("カテゴリー", [c['name'] for c in categories])
+                m_sub_options = [c['subs'] for c in categories if c['name'] == m_cat][0]
+                m_sub = st.selectbox("小カテゴリー", m_sub_options)
+                m_dur = st.number_input("時間 (分)", min_value=1.0, value=30.0, step=1.0)
+                m_memo = st.text_input("内容（メモ）")
+                
+                if st.form_submit_button("手動追加を保存"):
+                    full_dt = datetime.combine(m_date, m_time).strftime("%Y-%m-%d %H:%M:%S")
+                    entry = {
+                        "Date": full_dt,
+                        "Category": m_cat,
+                        "SubCategory": m_sub,
+                        "Duration": m_dur,
+                        "Memo": m_memo,
+                        "Source": "Manual_Entry"
+                    }
+                    save_log(entry)
+                    st.success("手動記録を保存しました。")
+                    st.rerun()
+
     with col2:
         st.subheader("カテゴリー")
         cols = st.columns(2)
         for idx, cat in enumerate(categories):
             with cols[idx % 2]:
-                # Using a native streamlit button but with a colored circle in the label
-                # Since streamlit buttons don't support full color well, we add a color indicator
-                if st.button(f"● {cat['name']}", key=f"cat_{idx}", use_container_width=True):
+                # Wrap button in a div with a colored left border for reliability
+                st.markdown(f'<div class="cat-marker" style="border-left-color: {cat["color"]};">', unsafe_allow_html=True)
+                if st.button(f"{cat['name']}", key=f"cat_{idx}", use_container_width=True):
                     st.session_state.selected_cat_idx = idx
-                
-                # Dynamic CSS for this button specifically
-                st.markdown(f"""
-                    <style>
-                    div[data-testid="stColumn"]:nth-child({(idx % 2) + 1}) button[key="cat_{idx}"] p {{
-                        color: {cat['color']};
-                    }}
-                    </style>
-                """, unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
         
         if 'selected_cat_idx' in st.session_state:
             selected_cat = categories[st.session_state.selected_cat_idx]
@@ -368,14 +390,65 @@ def analysis_tab():
     )
     
     st.divider()
-    st.subheader("作業履歴 (最新20件)")
-    st.dataframe(df.head(20), use_container_width=True)
+    st.subheader("作業履歴・管理")
+    st.caption("💡 表の中身を直接編集したり、行を選択して削除（Deleteキー）することができます。完了後に「変更を保存」を押してください。")
+    
+    # Use data_editor for CRUD
+    edited_df = st.data_editor(
+        df,
+        key="logs_editor",
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "id": st.column_config.NumberColumn("ID", disabled=True),
+            "timestamp": st.column_config.TextColumn("日次 (YYYY-MM-DD HH:MM:SS)"),
+            "category": st.column_config.SelectboxColumn("カテゴリー", options=[c['name'] for c in categories]),
+            "duration_min": st.column_config.NumberColumn("時間 (分)", min_value=0),
+            "source": st.column_config.TextColumn("ソース", disabled=True),
+            "event_id": st.column_config.TextColumn("EventID", disabled=True)
+        },
+        hide_index=True
+    )
+    
+    if st.button("📝 変更をデータベースに反映"):
+        # Detect changes
+        state = st.session_state.logs_editor
+        
+        # Process Deletions
+        if "deleted_rows" in state:
+            for idx in state["deleted_rows"]:
+                log_id = df.iloc[idx]["id"]
+                delete_log(log_id)
+        
+        # Process Edits
+        if "edited_rows" in state:
+            for idx, changes in state["edited_rows"].items():
+                row = df.iloc[int(idx)]
+                log_id = row["id"]
+                # Merge changes
+                new_cat = changes.get("category", row["category"])
+                new_sub = changes.get("sub_category", row["sub_category"])
+                new_dur = changes.get("duration_min", row["duration_min"])
+                new_memo = changes.get("memo", row["memo"])
+                new_time = changes.get("timestamp", row["timestamp"])
+                update_log(log_id, new_cat, new_sub, new_dur, new_memo, new_time)
+        
+        st.success("変更を保存しました。")
+        st.rerun()
 
 def settings_tab():
     st.title("⚙️ 設定")
-    categories = load_categories()
     
-    st.markdown("カテゴリーの名前や色を編集できます。データは即座にデータベースへ反映されます。")
+    col_s1, col_s2 = st.columns([3, 1])
+    with col_s1:
+        st.markdown("カテゴリーの名前や色を編集できます。")
+    with col_s2:
+        if st.button("🔄 カテゴリーを初期化", use_container_width=True):
+            init_db(force=True)
+            st.success("カテゴリーを初期状態にリセットしました。")
+            st.rerun()
+
+    categories = load_categories()
 
     for i, cat in enumerate(categories):
         with st.expander(f"{cat['name']} ({cat['color']})"):
