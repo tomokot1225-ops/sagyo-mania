@@ -2,11 +2,18 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import time
 import json
 import sqlite3
 import os
+import pytz
+
+# --- TIMEZONE CONFIG ---
+JST = pytz.timezone('Asia/Tokyo')
+
+def get_now_jst():
+    return datetime.now(JST)
 import io
 
 # --- PAGE CONFIG ---
@@ -172,6 +179,9 @@ def save_log(entry):
     ''', (entry["Date"], entry["Category"], entry["SubCategory"], entry["Duration"], entry["Memo"], entry["Source"], entry.get("EventID")))
     conn.commit()
     conn.close()
+    # Force reload of logs from DB to clear editor state cache
+    if 'logs_df' in st.session_state:
+        del st.session_state['logs_df']
 
 def update_last_memo(timestamp, memo):
     conn = get_db_connection()
@@ -181,10 +191,13 @@ def update_last_memo(timestamp, memo):
     conn.close()
 
 def load_logs():
-    conn = get_db_connection()
-    df = pd.read_sql_query('SELECT * FROM work_logs ORDER BY timestamp DESC', conn)
-    conn.close()
-    return df
+    # Cache to avoid re-calculating if not modified
+    if 'logs_df' not in st.session_state:
+        conn = get_db_connection()
+        df = pd.read_sql_query('SELECT * FROM work_logs ORDER BY timestamp DESC', conn)
+        conn.close()
+        st.session_state.logs_df = df
+    return st.session_state.logs_df
 
 def delete_log(log_id):
     conn = get_db_connection()
@@ -192,6 +205,9 @@ def delete_log(log_id):
     cursor.execute('DELETE FROM work_logs WHERE id = ?', (log_id,))
     conn.commit()
     conn.close()
+    # Clear cache
+    if 'logs_df' in st.session_state:
+        del st.session_state['logs_df']
 
 def update_log(log_id, category, sub_category, duration, memo, timestamp):
     conn = get_db_connection()
@@ -203,6 +219,9 @@ def update_log(log_id, category, sub_category, duration, memo, timestamp):
     ''', (category, sub_category, duration, memo, timestamp, log_id))
     conn.commit()
     conn.close()
+    # Clear cache
+    if 'logs_df' in st.session_state:
+        del st.session_state['logs_df']
 
 def save_category_setting(name, color, subs, keywords):
     conn = get_db_connection()
@@ -255,9 +274,10 @@ def record_tab():
                 st.progress(min(int(st.session_state.elapsed_seconds % 60) / 60, 1.0))
                 st.caption(f"計測中: {st.session_state.current_category} / {st.session_state.current_sub_category}")
                 if st.button("⏹️ 終了して保存", type="primary", use_container_width=True):
-                    # Save immediately with empty memo
+                    # Save immediately with empty memo in JST
+                    now_str = get_now_jst().strftime("%Y-%m-%d %H:%M:%S")
                     entry = {
-                        "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "Date": now_str,
                         "Category": st.session_state.current_category,
                         "SubCategory": st.session_state.current_sub_category,
                         "Duration": round(st.session_state.elapsed_seconds / 60, 2),
@@ -293,8 +313,8 @@ def record_tab():
         st.divider()
         with st.expander("➕ 手動で記録を追加"):
             # Move selectboxes outside the form for reactivity
-            m_date = st.date_input("日付", value=datetime.today())
-            m_time = st.time_input("開始時刻", value=datetime.now().time())
+            m_date = st.date_input("日付", value=get_now_jst().date())
+            m_time = st.time_input("開始時刻", value=get_now_jst().time())
             m_cat = st.selectbox("カテゴリー", [c['name'] for c in categories], key="manual_cat")
             
             # Sub categories will now update reactively
@@ -306,6 +326,7 @@ def record_tab():
                 m_memo = st.text_input("内容（メモ）")
                 
                 if st.form_submit_button("手動追加を保存"):
+                    # Create JST naive datetime then stringify
                     full_dt = datetime.combine(m_date, m_time).strftime("%Y-%m-%d %H:%M:%S")
                     entry = {
                         "Date": full_dt,
@@ -317,8 +338,7 @@ def record_tab():
                     }
                     save_log(entry)
                     st.success("手動記録を保存しました。")
-                    # No rerun here to let the success message be seen, 
-                    # but clear_on_submit handles some form fields.
+                    st.rerun()
 
     with col2:
         st.subheader("カテゴリー")
@@ -356,14 +376,14 @@ def analysis_tab():
         st.info("データがありません。作業を記録してください。")
         return
 
-    st.subheader("作業履歴・管理")
-    st.caption("💡 表の中身を直接編集したり、行を選択して削除（Deleteキー）することができます。下のグラフに即座に反映されます。")
+    st.subheader("作業履歴の管理")
+    st.caption("💡 表の左端をチェック（複数可）して「🗑️ 選択した記録を削除」を押すか、表の中身を直接編集してください。")
     
-    # Use data_editor for CRUD and get the results immediately
+    # Selection for deletion and editing
+    # We use st.data_editor to allow both editing and selection
     edited_df = st.data_editor(
         df,
         key="logs_editor",
-        num_rows="dynamic",
         use_container_width=True,
         column_config={
             "id": st.column_config.NumberColumn("ID", disabled=True),
@@ -373,21 +393,34 @@ def analysis_tab():
             "source": st.column_config.TextColumn("ソース", disabled=True),
             "event_id": st.column_config.TextColumn("EventID", disabled=True)
         },
-        hide_index=True
+        hide_index=True,
+        on_change=None # We will process deletions/edits via buttons
     )
+
+    # Deletion Flow
+    state = st.session_state.logs_editor
+    deleted_indices = state.get("deleted_rows", [])
     
-    coll, colr = st.columns([1, 1])
-    with coll:
-        if st.button("📝 変更をデータベースに保存", use_container_width=True):
-            state = st.session_state.logs_editor
-            # Process Deletions
-            if "deleted_rows" in state:
-                for idx in state["deleted_rows"]:
+    col_c1, col_c2 = st.columns([1, 1])
+    
+    # Handle Deletions explicitly with an alert
+    if deleted_indices:
+        with col_c1:
+            st.warning(f"⚠️ {len(deleted_indices)} 件の記録が削除対象として選択されています。")
+            if st.button("🗑️ 選択した記録を完全に削除する", type="primary", use_container_width=True):
+                for idx in deleted_indices:
                     log_id = df.iloc[idx]["id"]
                     delete_log(log_id)
-            # Process Edits
-            if "edited_rows" in state:
-                for idx, changes in state["edited_rows"].items():
+                st.success("データベースから完全に削除しました。")
+                st.rerun()
+    
+    # Handle Edits
+    edited_rows = state.get("edited_rows", {})
+    if edited_rows:
+        with col_c2:
+            st.info(f"📝 {len(edited_rows)} 件の編集が行われています。")
+            if st.button("💾 編集内容を保存する", type="primary", use_container_width=True):
+                for idx, changes in edited_rows.items():
                     row = df.iloc[int(idx)]
                     log_id = row["id"]
                     new_cat = changes.get("category", row["category"])
@@ -396,13 +429,15 @@ def analysis_tab():
                     new_memo = changes.get("memo", row["memo"])
                     new_time = changes.get("timestamp", row["timestamp"])
                     update_log(log_id, new_cat, new_sub, new_dur, new_memo, new_time)
-            st.success("変更を保存しました。")
-            st.rerun()
-    with colr:
+                st.success("編集を保存しました。")
+                st.rerun()
+    
+    if not deleted_indices and not edited_rows:
+        st.info("💡 表の中で行を削除（Deleteキー）したり編集したりすると、確定ボタンが表示されます。")
         # CSV Export
         csv = edited_df.to_csv(index=False).encode('utf-8-sig')
         st.download_button(
-            label="📥 現在表示中のデータをCSV出力",
+            label="📥 現在のデータをCSV出力",
             data=csv,
             file_name=f'work_logs_{datetime.now().strftime("%Y%m%d")}.csv',
             mime='text/csv',
