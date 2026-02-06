@@ -331,11 +331,35 @@ def record_tab():
 
     with col2:
         st.subheader("カテゴリー")
+        
+        # Inject custom CSS for category buttons
+        css_blocks = []
+        for i, cat in enumerate(categories):
+            # Sanitize name for CSS class (simple hex hash for safety with Japanese)
+            safe_name = f"cat-btn-{i}" 
+            css_blocks.append(f"""
+                div.{safe_name} button {{
+                    background-color: {cat['color']} !important;
+                    color: white !important;
+                    border: none !important;
+                    height: 50px !important;
+                }}
+                div.{safe_name} button:hover {{
+                    filter: brightness(0.85) !important;
+                    box-shadow: 0 4px 8px rgba(0,0,0,0.2) !important;
+                }}
+                div.{safe_name} button:active {{
+                    transform: scale(0.98) !important;
+                }}
+            """)
+        
+        st.markdown(f"<style>{''.join(css_blocks)}</style>", unsafe_allow_html=True)
+
         cols = st.columns(2)
         for idx, cat in enumerate(categories):
             with cols[idx % 2]:
-                # Wrap button in a div with a colored left border for reliability
-                st.markdown(f'<div class="cat-marker" style="border-left-color: {cat["color"]};">', unsafe_allow_html=True)
+                # Use wrap div with unique class for targeting
+                st.markdown(f'<div class="cat-btn-{idx}">', unsafe_allow_html=True)
                 if st.button(f"{cat['name']}", key=f"cat_{idx}", use_container_width=True):
                     st.session_state.selected_cat_idx = idx
                 st.markdown('</div>', unsafe_allow_html=True)
