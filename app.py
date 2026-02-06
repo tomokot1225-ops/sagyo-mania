@@ -355,65 +355,11 @@ def analysis_tab():
     if df.empty:
         st.info("データがありません。作業を記録してください。")
         return
-        
-    color_map = {cat['name']: cat['color'] for cat in categories}
-    
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        st.subheader("カテゴリー別時間配分")
-        cat_counts = df.groupby('category')['duration_min'].sum().reset_index()
-        fig_pie = px.pie(
-            cat_counts, values='duration_min', names='category', 
-            hole=.3, color='category', color_discrete_map=color_map
-        )
-        st.plotly_chart(fig_pie, use_container_width=True)
-        
-    with col2:
-        st.subheader("稼働推移")
-        view_mode = st.radio("表示単位", ["日次", "週次", "月次"], horizontal=True, label_visibility="collapsed")
-        
-        df['dt'] = pd.to_datetime(df['timestamp'])
-        if view_mode == "日次":
-            df['Period'] = df['dt'].dt.date
-            xaxis_title = "日付"
-        elif view_mode == "週次":
-            # Week starts on Monday
-            df['Period'] = df['dt'].dt.to_period('W').apply(lambda r: r.start_time.date())
-            xaxis_title = "週 (月曜開始)"
-        else:
-            df['Period'] = df['dt'].dt.to_period('M').apply(lambda r: r.start_time.date())
-            xaxis_title = "月"
-            
-        period_cat = df.groupby(['Period', 'category'])['duration_min'].sum().reset_index()
-        
-        fig_bar = px.bar(
-            period_cat, x='Period', y='duration_min', color='category', 
-            barmode='stack', color_discrete_map=color_map
-        )
-        fig_bar.update_layout(xaxis_title=xaxis_title, yaxis_title="作業時間 (分)")
-        # For monthly view, ensure x-axis labels show months properly
-        if view_mode == "月次":
-            fig_bar.update_xaxes(dtick="M1", tickformat="%Y-%m")
-        st.plotly_chart(fig_bar, use_container_width=True)
-    
-    st.divider()
-    st.subheader("データ書き出し")
-    
-    # CSV Export
-    csv = df.to_csv(index=False).encode('utf-8-sig')
-    st.download_button(
-        label="📥 全データをCSVとしてダウンロード",
-        data=csv,
-        file_name=f'work_logs_{datetime.now().strftime("%Y%m%d")}.csv',
-        mime='text/csv',
-    )
-    
-    st.divider()
+
     st.subheader("作業履歴・管理")
-    st.caption("💡 表の中身を直接編集したり、行を選択して削除（Deleteキー）することができます。完了後に「変更を保存」を押してください。")
+    st.caption("💡 表の中身を直接編集したり、行を選択して削除（Deleteキー）することができます。下のグラフに即座に反映されます。")
     
-    # Use data_editor for CRUD
+    # Use data_editor for CRUD and get the results immediately
     edited_df = st.data_editor(
         df,
         key="logs_editor",
@@ -430,31 +376,86 @@ def analysis_tab():
         hide_index=True
     )
     
-    if st.button("📝 変更をデータベースに反映"):
-        # Detect changes
-        state = st.session_state.logs_editor
+    coll, colr = st.columns([1, 1])
+    with coll:
+        if st.button("📝 変更をデータベースに保存", use_container_width=True):
+            state = st.session_state.logs_editor
+            # Process Deletions
+            if "deleted_rows" in state:
+                for idx in state["deleted_rows"]:
+                    log_id = df.iloc[idx]["id"]
+                    delete_log(log_id)
+            # Process Edits
+            if "edited_rows" in state:
+                for idx, changes in state["edited_rows"].items():
+                    row = df.iloc[int(idx)]
+                    log_id = row["id"]
+                    new_cat = changes.get("category", row["category"])
+                    new_sub = changes.get("sub_category", row["sub_category"])
+                    new_dur = changes.get("duration_min", row["duration_min"])
+                    new_memo = changes.get("memo", row["memo"])
+                    new_time = changes.get("timestamp", row["timestamp"])
+                    update_log(log_id, new_cat, new_sub, new_dur, new_memo, new_time)
+            st.success("変更を保存しました。")
+            st.rerun()
+    with colr:
+        # CSV Export
+        csv = edited_df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label="📥 現在表示中のデータをCSV出力",
+            data=csv,
+            file_name=f'work_logs_{datetime.now().strftime("%Y%m%d")}.csv',
+            mime='text/csv',
+            use_container_width=True
+        )
+
+    st.divider()
+    
+    # Use edited_df for charts so they update in real-time
+    color_map = {cat['name']: cat['color'] for cat in categories}
+    
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        st.subheader("カテゴリー別時間配分")
+        if not edited_df.empty:
+            cat_counts = edited_df.groupby('category')['duration_min'].sum().reset_index()
+            fig_pie = px.pie(
+                cat_counts, values='duration_min', names='category', 
+                hole=.3, color='category', color_discrete_map=color_map
+            )
+            st.plotly_chart(fig_pie, use_container_width=True)
+        else:
+            st.write("データがありません")
         
-        # Process Deletions
-        if "deleted_rows" in state:
-            for idx in state["deleted_rows"]:
-                log_id = df.iloc[idx]["id"]
-                delete_log(log_id)
+    with col2:
+        st.subheader("稼働推移")
+        view_mode = st.radio("表示単位", ["日次", "週次", "月次"], horizontal=True, label_visibility="collapsed")
         
-        # Process Edits
-        if "edited_rows" in state:
-            for idx, changes in state["edited_rows"].items():
-                row = df.iloc[int(idx)]
-                log_id = row["id"]
-                # Merge changes
-                new_cat = changes.get("category", row["category"])
-                new_sub = changes.get("sub_category", row["sub_category"])
-                new_dur = changes.get("duration_min", row["duration_min"])
-                new_memo = changes.get("memo", row["memo"])
-                new_time = changes.get("timestamp", row["timestamp"])
-                update_log(log_id, new_cat, new_sub, new_dur, new_memo, new_time)
-        
-        st.success("変更を保存しました。")
-        st.rerun()
+        if not edited_df.empty:
+            edited_df['dt'] = pd.to_datetime(edited_df['timestamp'])
+            if view_mode == "日次":
+                edited_df['Period'] = edited_df['dt'].dt.date
+                xaxis_title = "日付"
+            elif view_mode == "週次":
+                edited_df['Period'] = edited_df['dt'].dt.to_period('W').apply(lambda r: r.start_time.date())
+                xaxis_title = "週 (月曜開始)"
+            else:
+                edited_df['Period'] = edited_df['dt'].dt.to_period('M').apply(lambda r: r.start_time.date())
+                xaxis_title = "月"
+                
+            period_cat = edited_df.groupby(['Period', 'category'])['duration_min'].sum().reset_index()
+            
+            fig_bar = px.bar(
+                period_cat, x='Period', y='duration_min', color='category', 
+                barmode='stack', color_discrete_map=color_map
+            )
+            fig_bar.update_layout(xaxis_title=xaxis_title, yaxis_title="作業時間 (分)")
+            if view_mode == "月次":
+                fig_bar.update_xaxes(dtick="M1", tickformat="%Y-%m")
+            st.plotly_chart(fig_bar, use_container_width=True)
+        else:
+            st.write("データがありません")
 
 def settings_tab():
     st.title("⚙️ 設定")
