@@ -242,39 +242,38 @@ def record_tab():
     col1, col2 = st.columns([1, 2])
     
     with col1:
-        st.markdown('<div class="dashboard-card">', unsafe_allow_html=True)
-        st.subheader("⏱️ タイマー")
-        
-        if st.session_state.timer_running:
-            elapsed = time.time() - st.session_state.start_time
-            st.session_state.elapsed_seconds = elapsed
-        
-        st.markdown(f'<div class="timer-container">{format_time(int(st.session_state.elapsed_seconds))}</div>', unsafe_allow_html=True)
-        
-        if st.session_state.timer_running:
-            st.progress(min(int(st.session_state.elapsed_seconds % 60) / 60, 1.0))
-            st.caption(f"計測中: {st.session_state.current_category} / {st.session_state.current_sub_category}")
-            if st.button("⏹️ 終了して保存", type="primary", use_container_width=True):
-                # Save immediately with empty memo
-                entry = {
-                    "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "Category": st.session_state.current_category,
-                    "SubCategory": st.session_state.current_sub_category,
-                    "Duration": round(st.session_state.elapsed_seconds / 60, 2),
-                    "Memo": "",
-                    "Source": "Manual"
-                }
-                save_log(entry)
-                
-                # Update states
-                st.session_state.timer_running = False
-                st.session_state.last_timestamp = entry["Date"]
-                st.session_state.show_memo_input = True
-                st.session_state.elapsed_seconds = 0
-                st.rerun()
-        else:
-            st.info("カテゴリーを選択して計測を開始してください。")
-        st.markdown('</div>', unsafe_allow_html=True)
+        with st.container(border=True):
+            st.subheader("⏱️ タイマー")
+            
+            if st.session_state.timer_running:
+                elapsed = time.time() - st.session_state.start_time
+                st.session_state.elapsed_seconds = elapsed
+            
+            st.markdown(f'<div class="timer-container">{format_time(int(st.session_state.elapsed_seconds))}</div>', unsafe_allow_html=True)
+            
+            if st.session_state.timer_running:
+                st.progress(min(int(st.session_state.elapsed_seconds % 60) / 60, 1.0))
+                st.caption(f"計測中: {st.session_state.current_category} / {st.session_state.current_sub_category}")
+                if st.button("⏹️ 終了して保存", type="primary", use_container_width=True):
+                    # Save immediately with empty memo
+                    entry = {
+                        "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "Category": st.session_state.current_category,
+                        "SubCategory": st.session_state.current_sub_category,
+                        "Duration": round(st.session_state.elapsed_seconds / 60, 2),
+                        "Memo": "",
+                        "Source": "Manual"
+                    }
+                    save_log(entry)
+                    
+                    # Update states
+                    st.session_state.timer_running = False
+                    st.session_state.last_timestamp = entry["Date"]
+                    st.session_state.show_memo_input = True
+                    st.session_state.elapsed_seconds = 0
+                    st.rerun()
+            else:
+                st.info("カテゴリーを選択して計測を開始してください。")
 
         if st.session_state.get('show_memo_input'):
             st.success("✅ 保存されました（メモは任意です）")
@@ -293,12 +292,16 @@ def record_tab():
 
         st.divider()
         with st.expander("➕ 手動で記録を追加"):
-            with st.form("manual_add_form"):
-                m_date = st.date_input("日付", value=datetime.today())
-                m_time = st.time_input("開始時刻", value=datetime.now().time())
-                m_cat = st.selectbox("カテゴリー", [c['name'] for c in categories])
-                m_sub_options = [c['subs'] for c in categories if c['name'] == m_cat][0]
-                m_sub = st.selectbox("小カテゴリー", m_sub_options)
+            # Move selectboxes outside the form for reactivity
+            m_date = st.date_input("日付", value=datetime.today())
+            m_time = st.time_input("開始時刻", value=datetime.now().time())
+            m_cat = st.selectbox("カテゴリー", [c['name'] for c in categories], key="manual_cat")
+            
+            # Sub categories will now update reactively
+            m_sub_options = [c['subs'] for c in categories if c['name'] == m_cat][0]
+            m_sub = st.selectbox("小カテゴリー", m_sub_options, key="manual_sub")
+            
+            with st.form("manual_add_form_inner", clear_on_submit=True):
                 m_dur = st.number_input("時間 (分)", min_value=1.0, value=30.0, step=1.0)
                 m_memo = st.text_input("内容（メモ）")
                 
@@ -314,7 +317,8 @@ def record_tab():
                     }
                     save_log(entry)
                     st.success("手動記録を保存しました。")
-                    st.rerun()
+                    # No rerun here to let the success message be seen, 
+                    # but clear_on_submit handles some form fields.
 
     with col2:
         st.subheader("カテゴリー")
@@ -366,15 +370,31 @@ def analysis_tab():
         st.plotly_chart(fig_pie, use_container_width=True)
         
     with col2:
-        st.subheader("日次稼働推移")
-        df['Date_only'] = pd.to_datetime(df['timestamp']).dt.date
-        daily_cat = df.groupby(['Date_only', 'category'])['duration_min'].sum().reset_index()
+        st.subheader("稼働推移")
+        view_mode = st.radio("表示単位", ["日次", "週次", "月次"], horizontal=True, label_visibility="collapsed")
+        
+        df['dt'] = pd.to_datetime(df['timestamp'])
+        if view_mode == "日次":
+            df['Period'] = df['dt'].dt.date
+            xaxis_title = "日付"
+        elif view_mode == "週次":
+            # Week starts on Monday
+            df['Period'] = df['dt'].dt.to_period('W').apply(lambda r: r.start_time.date())
+            xaxis_title = "週 (月曜開始)"
+        else:
+            df['Period'] = df['dt'].dt.to_period('M').apply(lambda r: r.start_time.date())
+            xaxis_title = "月"
+            
+        period_cat = df.groupby(['Period', 'category'])['duration_min'].sum().reset_index()
         
         fig_bar = px.bar(
-            daily_cat, x='Date_only', y='duration_min', color='category', 
+            period_cat, x='Period', y='duration_min', color='category', 
             barmode='stack', color_discrete_map=color_map
         )
-        fig_bar.update_layout(xaxis_title="日付", yaxis_title="作業時間 (分)")
+        fig_bar.update_layout(xaxis_title=xaxis_title, yaxis_title="作業時間 (分)")
+        # For monthly view, ensure x-axis labels show months properly
+        if view_mode == "月次":
+            fig_bar.update_xaxes(dtick="M1", tickformat="%Y-%m")
         st.plotly_chart(fig_bar, use_container_width=True)
     
     st.divider()
