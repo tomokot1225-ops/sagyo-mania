@@ -107,6 +107,11 @@ if 'initialized' not in st.session_state:
 
 # --- HELPER FUNCTIONS ---
 
+def format_time(seconds):
+    hours, remainder = divmod(int(seconds), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02}:{minutes:02}:{seconds:02}"
+
 def get_google_creds():
     """Manage Google OAuth2 credentials."""
     creds = None
