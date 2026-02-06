@@ -5,15 +5,83 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import time
 import json
-import gspread
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
+import sqlite3
 import os
+import io
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="作業マニア", page_icon="⏱️", layout="wide")
+
+# --- DATABASE SETUP ---
+DB_NAME = "data.db"
+
+def get_db_connection():
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Logs Table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS work_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            category TEXT,
+            sub_category TEXT,
+            duration_min REAL,
+            memo TEXT,
+            source TEXT,
+            event_id TEXT UNIQUE
+        )
+    ''')
+    
+    # Categories Table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE,
+            color TEXT,
+            keywords TEXT
+        )
+    ''')
+    
+    # Sub Categories Table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sub_categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category_name TEXT,
+            name TEXT,
+            FOREIGN KEY (category_name) REFERENCES categories (name) ON DELETE CASCADE
+        )
+    ''')
+    
+    # Initial Data if empty
+    cursor.execute('SELECT COUNT(*) FROM categories')
+    if cursor.fetchone()[0] == 0:
+        default_cats = [
+            ("社内", "#E25D33", "社内, 準備", "社内"),
+            ("全社関連", "#4351AF", "全社会議, HR関連", "全社, 会議"),
+            ("社外", "#397E49", "社外, 準備", "社外, 商談"),
+            ("研修", "#5EB47E", "MENTA, ツール説明", "研修, 勉強"),
+            ("問い合わせ関連作業", "#EEC14C", "担当者, biz@", "問い合わせ"),
+            ("受講者メール等個別対応", "#832DA4", "メール, 個別対応", "メール"),
+            ("対面訪問", "#C3291C", "移動, 打ち合わせ", "訪問, 移動"),
+            ("レポート送付", "#616161", "月次, イレギュラー", "レポート"),
+            ("初動関連", "#D88277", "見積・申請, その他", "見積, 申請"),
+            ("デフォルト", "#4599DF", "基盤メール返信, 基盤bot, 基盤レポート, Looker, 基盤コレタ", "")
+        ]
+        for name, color, subs, keywords in default_cats:
+            cursor.execute('INSERT INTO categories (name, color, keywords) VALUES (?, ?, ?)', (name, color, keywords))
+            for sub in subs.split(", "):
+                cursor.execute('INSERT INTO sub_categories (category_name, name) VALUES (?, ?)', (name, sub))
+                
+    conn.commit()
+    conn.close()
+
+init_db()
 
 # --- CUSTOM CSS ---
 st.markdown("""
@@ -28,18 +96,6 @@ st.markdown("""
         background-color: #F8F9FA;
     }
     
-    /* Header Style */
-    .main-header {
-        background-color: #4B7DC3;
-        padding: 1.5rem;
-        border-radius: 10px;
-        color: white;
-        text-align: center;
-        margin-bottom: 2rem;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    }
-    
-    /* Timer Display */
     .timer-container {
         font-size: 5rem;
         font-weight: 700;
@@ -49,24 +105,16 @@ st.markdown("""
         font-variant-numeric: tabular-nums;
     }
     
-    /* Category Button Styles */
     .stButton > button {
         border-radius: 8px;
         font-weight: 600;
         transition: all 0.3s ease;
     }
     
-    .category-btn {
-        width: 100%;
-        margin-bottom: 0.5rem;
-    }
-    
-    /* Progress Bar Theme */
     .stProgress > div > div > div > div {
         background-color: #4B7DC3;
     }
     
-    /* Dashboard Cards */
     .dashboard-card {
         background: white;
         padding: 1.5rem;
@@ -77,21 +125,54 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- CONSTANTS & DEFAULTS ---
-SPREADSHEET_ID = "1icojXZtz6tXwlJ7fDzdgW2Ditlx1oudq7inUyrGNL8o"
+# --- HELPER FUNCTIONS ---
 
-DEFAULT_CATEGORIES = [
-    {"name": "社内", "color": "#E25D33", "subs": ["社内", "準備"], "keywords": ["社内"]},
-    {"name": "全社関連", "color": "#4351AF", "subs": ["全社会議", "HR関連"], "keywords": ["全社", "会議"]},
-    {"name": "社外", "color": "#397E49", "subs": ["社外", "準備"], "keywords": ["社外", "商談"]},
-    {"name": "研修", "color": "#5EB47E", "subs": ["MENTA", "ツール説明"], "keywords": ["研修", "勉強"]},
-    {"name": "問い合わせ関連作業", "color": "#EEC14C", "subs": ["担当者", "biz@"], "keywords": ["問い合わせ"]},
-    {"name": "受講者メール等個別対応", "color": "#832DA4", "subs": ["メール", "個別対応"], "keywords": ["メール"]},
-    {"name": "対面訪問", "color": "#C3291C", "subs": ["移動", "打ち合わせ"], "keywords": ["訪問", "移動"]},
-    {"name": "レポート送付", "color": "#616161", "subs": ["月次", "イレギュラー"], "keywords": ["レポート"]},
-    {"name": "初動関連", "color": "#D88277", "subs": ["見積・申請", "その他"], "keywords": ["見積", "申請"]},
-    {"name": "デフォルト", "color": "#4599DF", "subs": ["基盤メール返信", "基盤bot", "基盤レポート", "Looker", "基盤コレタ"], "keywords": []}
-]
+def format_time(seconds):
+    hours, remainder = divmod(int(seconds), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02}:{minutes:02}:{seconds:02}"
+
+def load_categories():
+    conn = get_db_connection()
+    df_cats = pd.read_sql_query('SELECT * FROM categories', conn)
+    df_subs = pd.read_sql_query('SELECT * FROM sub_categories', conn)
+    conn.close()
+    
+    categories = []
+    for _, cat in df_cats.iterrows():
+        categories.append({
+            "name": cat["name"],
+            "color": cat["color"],
+            "keywords": [k.strip() for k in str(cat["keywords"]).split(",") if k.strip()],
+            "subs": df_subs[df_subs["category_name"] == cat["name"]]["name"].tolist()
+        })
+    return categories
+
+def save_log(entry):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO work_logs (timestamp, category, sub_category, duration_min, memo, source, event_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (entry["Date"], entry["Category"], entry["SubCategory"], entry["Duration"], entry["Memo"], entry["Source"], entry.get("EventID")))
+    conn.commit()
+    conn.close()
+
+def load_logs():
+    conn = get_db_connection()
+    df = pd.read_sql_query('SELECT * FROM work_logs ORDER BY timestamp DESC', conn)
+    conn.close()
+    return df
+
+def save_category_setting(name, color, subs, keywords):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('UPDATE categories SET color = ?, keywords = ? WHERE name = ?', (color, keywords, name))
+    cursor.execute('DELETE FROM sub_categories WHERE category_name = ?', (name,))
+    for sub in subs:
+        cursor.execute('INSERT INTO sub_categories (category_name, name) VALUES (?, ?)', (name, sub))
+    conn.commit()
+    conn.close()
 
 # --- SESSION STATE INITIALIZATION ---
 if 'initialized' not in st.session_state:
@@ -100,259 +181,23 @@ if 'initialized' not in st.session_state:
     st.session_state.start_time = None
     st.session_state.current_category = None
     st.session_state.current_sub_category = None
-    st.session_state.categories = DEFAULT_CATEGORIES
-    st.session_state.logs = [] # Local cache to speed up UI
     st.session_state.elapsed_seconds = 0
     st.session_state.data_loaded = False
 
-# --- HELPER FUNCTIONS ---
-
-def format_time(seconds):
-    hours, remainder = divmod(int(seconds), 3600)
-    minutes, seconds = divmod(remainder, 60)
-    return f"{hours:02}:{minutes:02}:{seconds:02}"
-
-def get_google_creds():
-    """Manage Google OAuth2 credentials."""
-    # Check if secrets exist FIRST to avoid KeyError
-    if "google" not in st.secrets:
-        st.error("🔑 **Secretsが見つかりません**")
-        st.info("""
-        `.streamlit/secrets.toml` (または Streamlit Cloud の Secrets 設定) に以下の情報を追加してください：
-        ```toml
-        [google]
-        client_id = "xxx.apps.googleusercontent.com"
-        client_secret = "GOCSPX-xxxx"
-        ```
-        """)
-        return None
-
-    if "client_id" not in st.secrets["google"] or "client_secret" not in st.secrets["google"]:
-        st.error("🔑 **Secrets のキーが不足しています**")
-        st.write("`client_id` と `client_secret` が正しく設定されているか確認してください。")
-        return None
-
-    creds = None
-    if 'token' in st.session_state:
-        try:
-            creds = Credentials.from_authorized_user_info(json.loads(st.session_state.token))
-        except:
-            pass
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            try:
-                client_config = {
-                    "web": {
-                        "client_id": st.secrets["google"]["client_id"],
-                        "client_secret": st.secrets["google"]["client_secret"],
-                        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                        "token_uri": "https://oauth2.googleapis.com/token",
-                    }
-                }
-                flow = InstalledAppFlow.from_client_config(
-                    client_config, 
-                    scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/calendar.readonly']
-                )
-                
-                # Check for environment
-                if os.environ.get("STREAMLIT_RUNTIME_ENV") == "cloud":
-                    st.warning("⚠️ **Streamlit Cloud 上では自動認証ブラウザを開けません**")
-                    st.write("ローカル環境で実行するか、Service Account を使用する構成への変更をご検討ください。")
-                    return None
-                
-                creds = flow.run_local_server(port=0)
-            except Exception as e:
-                st.error(f"認証エラー: {e}")
-                return None
-        
-        st.session_state.token = creds.to_json()
-    
-    return creds
-
-def get_sheets_service():
-    creds = get_google_creds()
-    if creds:
-        return gspread.authorize(creds)
-    return None
-
-def save_log_to_sheets(entry):
-    """Save a single log entry to the Google Sheet."""
-    try:
-        client = get_sheets_service()
-        if client:
-            sheet = client.open_by_key(SPREADSHEET_ID).worksheet("logs")
-            row = [
-                entry.get("Date"), 
-                entry.get("Category"), 
-                entry.get("SubCategory"), 
-                entry.get("Duration"), 
-                entry.get("Memo"), 
-                entry.get("Source"),
-                entry.get("EventID", "")
-            ]
-            sheet.append_row(row)
-            return True
-    except Exception as e:
-        st.error(f"Spreadsheet保存エラー: {e}")
-    return False
-
-def load_logs_from_sheets():
-    try:
-        client = get_sheets_service()
-        if client:
-            sheet = client.open_by_key(SPREADSHEET_ID).worksheet("logs")
-            data = sheet.get_all_records()
-            return pd.DataFrame(data)
-    except Exception as e:
-        st.error(f"データ取得エラー: {e}")
-    return pd.DataFrame()
-
-def save_settings_to_sheets():
-    try:
-        client = get_sheets_service()
-        if client:
-            try:
-                sheet = client.open_by_key(SPREADSHEET_ID).worksheet("settings")
-            except gspread.exceptions.WorksheetNotFound:
-                # Create if not exists
-                gc = client.open_by_key(SPREADSHEET_ID)
-                sheet = gc.add_worksheet(title="settings", rows="100", cols="20")
-            
-            sheet.clear()
-            # Headers
-            sheet.update('A1', [['CategoryName', 'Color', 'SubCategories', 'Keywords']])
-            rows = []
-            for cat in st.session_state.categories:
-                rows.append([
-                    cat['name'], 
-                    cat['color'], 
-                    ",".join(cat['subs']), 
-                    ",".join(cat['keywords'])
-                ])
-            sheet.append_rows(rows)
-            st.success("設定をスプレッドシートに保存しました。")
-    except Exception as e:
-        st.error(f"設定保存エラー: {e}")
-
-def load_settings_from_sheets():
-    try:
-        client = get_sheets_service()
-        if client:
-            sheet = client.open_by_key(SPREADSHEET_ID).worksheet("settings")
-            data = sheet.get_all_records()
-            if data:
-                categories = []
-                for row in data:
-                    categories.append({
-                        "name": row['CategoryName'],
-                        "color": row['Color'],
-                        "subs": [s.strip() for s in str(row['SubCategories']).split(",") if s.strip()],
-                        "keywords": [k.strip() for k in str(row['Keywords']).split(",") if k.strip()]
-                    })
-                st.session_state.categories = categories
-    except Exception:
-        pass
-
-def sync_calendar():
-    """Fetch events from Google Calendar and categorize them."""
-    creds = get_google_creds()
-    if not creds: return
-    
-    try:
-        service = build('calendar', 'v3', credentials=creds)
-        start_of_day = datetime.combine(datetime.today(), datetime.min.time()).isoformat() + 'Z'
-        
-        events_result = service.events().list(
-            calendarId='primary', timeMin=start_of_day,
-            singleEvents=True, orderBy='startTime'
-        ).execute()
-        events = events_result.get('items', [])
-
-        if not events:
-            st.info('カレンダーに予定が見つかりませんでした。')
-            return
-
-        existing_df = load_logs_from_sheets()
-        existing_event_ids = set()
-        if not existing_df.empty and 'EventID' in existing_df.columns:
-            existing_event_ids = set(existing_df['EventID'].astype(str).tolist())
-
-        new_entries = []
-        for event in events:
-            eid = event.get('id')
-            if eid in existing_event_ids: continue
-                
-            title = event.get('summary', '')
-            start = event['start'].get('dateTime', event['start'].get('date'))
-            end = event['end'].get('dateTime', event['end'].get('date'))
-            if not start or not end: continue
-            
-            start_dt = datetime.fromisoformat(start.replace('Z', '+00:00'))
-            end_dt = datetime.fromisoformat(end.replace('Z', '+00:00'))
-            duration_min = (end_dt - start_dt).total_seconds() / 60
-            
-            matched_cat = "デフォルト"
-            matched_sub = "未分類"
-            for cat in st.session_state.categories:
-                for kw in cat['keywords']:
-                    if kw and kw.lower() in title.lower():
-                        matched_cat = cat['name']
-                        matched_sub = cat['subs'][0] if cat['subs'] else "未分類"
-                        break
-            
-            entry = {
-                "Date": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                "Category": matched_cat,
-                "SubCategory": matched_sub,
-                "Duration": round(duration_min, 2),
-                "Memo": title,
-                "Source": "Calendar",
-                "EventID": eid
-            }
-            if save_log_to_sheets(entry):
-                new_entries.append(entry)
-        
-        if new_entries:
-            st.success(f"{len(new_entries)}件の新しいカレンダー予定を同期しました。")
-            st.rerun()
-        else:
-            st.info("新しい予定はありませんでした。")
-    except Exception as e:
-        st.error(f"カレンダー同期エラー: {e}")
-
 # --- UI COMPONENTS ---
 
-def sidebar_auth():
+def sidebar():
     with st.sidebar:
         st.image("https://img.icons8.com/clouds/100/000000/stopwatch.png", width=100)
         st.title("作業マニア")
-        st.markdown("### 認証ステータス")
-        
-        if 'token' in st.session_state:
-            st.success("✅ Google連携中")
-            if st.button("🔄 再認証 / ログアウト"):
-                del st.session_state.token
-                st.rerun()
-        else:
-            st.info("🔓 未認証")
-            if st.button("Google連携を開始"):
-                get_google_creds()
-                st.rerun()
+        st.info("🏠 ローカルDB運用中")
         
         st.divider()
-        if st.button("📋 最新データを読み込み"):
-            load_settings_from_sheets()
-            st.session_state.logs = load_logs_from_sheets().to_dict('records')
-            st.success("最新データを取得しました。")
-        
-        st.divider()
-        st.write("Ver 1.0.0")
+        st.write("Ver 2.0.0 (SQLite Edition)")
 
 def record_tab():
     st.title("🚀 作業記録")
+    categories = load_categories()
     
     col1, col2 = st.columns([1, 2])
     
@@ -388,10 +233,8 @@ def record_tab():
                         "Memo": memo,
                         "Source": "Manual"
                     }
-                    if save_log_to_sheets(entry):
-                        st.session_state.logs.append(entry)
-                        st.success("保存しました。")
-                    
+                    save_log(entry)
+                    st.success("保存しました。")
                     st.session_state.elapsed_seconds = 0
                     st.session_state.needs_save = False
                     st.rerun()
@@ -399,14 +242,13 @@ def record_tab():
     with col2:
         st.subheader("カテゴリー")
         cols = st.columns(2)
-        for idx, cat in enumerate(st.session_state.categories):
+        for idx, cat in enumerate(categories):
             with cols[idx % 2]:
-                btn_label = f"● {cat['name']}"
-                if st.button(btn_label, key=f"cat_{idx}", use_container_width=True):
+                if st.button(f"● {cat['name']}", key=f"cat_{idx}", use_container_width=True):
                     st.session_state.selected_cat_idx = idx
         
         if 'selected_cat_idx' in st.session_state:
-            selected_cat = st.session_state.categories[st.session_state.selected_cat_idx]
+            selected_cat = categories[st.session_state.selected_cat_idx]
             st.divider()
             st.markdown(f"### {selected_cat['name']} の小カテゴリー")
             sub_cols = st.columns(3)
@@ -420,89 +262,84 @@ def record_tab():
                             st.session_state.current_sub_category = sub
                             st.rerun()
 
-    st.divider()
-    st.subheader("📅 カレンダー同期")
-    if st.button("Googleカレンダーから取得"):
-        sync_calendar()
-
-
 def analysis_tab():
     st.title("📊 稼働分析")
     
-    # Reload logs from sheets if possible
-    df = load_logs_from_sheets()
+    df = load_logs()
+    categories = load_categories()
     
     if df.empty:
         st.info("データがありません。作業を記録してください。")
         return
         
-    # Ensure color mapping
-    color_map = {cat['name']: cat['color'] for cat in st.session_state.categories}
+    color_map = {cat['name']: cat['color'] for cat in categories}
     
-    col1, col2 = st.columns(2)
+    col1, col2 = st.columns([1, 1])
     
     with col1:
         st.subheader("カテゴリー別時間配分")
-        cat_counts = df.groupby('Category')['Duration'].sum().reset_index()
+        cat_counts = df.groupby('category')['duration_min'].sum().reset_index()
         fig_pie = px.pie(
-            cat_counts, values='Duration', names='Category', 
-            hole=.3, color='Category', color_discrete_map=color_map
+            cat_counts, values='duration_min', names='category', 
+            hole=.3, color='category', color_discrete_map=color_map
         )
         st.plotly_chart(fig_pie, use_container_width=True)
         
     with col2:
         st.subheader("日次稼働推移")
-        # Pre-process dates
-        df['Date_only'] = pd.to_datetime(df['Date']).dt.date
-        daily_cat = df.groupby(['Date_only', 'Category'])['Duration'].sum().reset_index()
+        df['Date_only'] = pd.to_datetime(df['timestamp']).dt.date
+        daily_cat = df.groupby(['Date_only', 'category'])['duration_min'].sum().reset_index()
         
         fig_bar = px.bar(
-            daily_cat, x='Date_only', y='Duration', color='Category', 
+            daily_cat, x='Date_only', y='duration_min', color='category', 
             barmode='stack', color_discrete_map=color_map
         )
         fig_bar.update_layout(xaxis_title="日付", yaxis_title="作業時間 (分)")
         st.plotly_chart(fig_bar, use_container_width=True)
     
     st.divider()
-    st.subheader("最近のログ")
-    st.dataframe(df.sort_values('Date', ascending=False).head(20), use_container_width=True)
+    st.subheader("データ書き出し")
+    
+    # CSV Export
+    csv = df.to_csv(index=False).encode('utf-8-sig')
+    st.download_button(
+        label="📥 全データをCSVとしてダウンロード",
+        data=csv,
+        file_name=f'work_logs_{datetime.now().strftime("%Y%m%d")}.csv',
+        mime='text/csv',
+    )
+    
+    st.divider()
+    st.subheader("作業履歴 (最新20件)")
+    st.dataframe(df.head(20), use_container_width=True)
 
 def settings_tab():
     st.title("⚙️ 設定")
-    st.markdown("設定内容はスプレッドシートの `settings` シートに保存されます。")
+    categories = load_categories()
     
-    if st.button("💾 全ての設定をシートに保存", type="primary"):
-        save_settings_to_sheets()
+    st.markdown("カテゴリーの名前や色を編集できます。データは即座にデータベースへ反映されます。")
 
-    for i, cat in enumerate(st.session_state.categories):
+    for i, cat in enumerate(categories):
         with st.expander(f"{cat['name']} ({cat['color']})"):
             c1, c2 = st.columns(2)
             with c1:
-                new_name = st.text_input("大カテゴリー名", value=cat['name'], key=f"edit_name_{i}")
                 new_color = st.color_picker("カラー", value=cat['color'], key=f"edit_color_{i}")
+                # We won't allow renaming the ID directly easily to avoid foreign key issues in this simple UI
+                st.caption(f"大カテゴリー名: {cat['name']}")
             with c2:
-                new_subs = st.text_area("小カテゴリー (カンマ区切り)", value=", ".join(cat['subs']), key=f"edit_subs_{i}")
-                new_keys = st.text_input("同期キーワード (カンマ区切り)", value=", ".join(cat['keywords']), key=f"edit_keys_{i}")
+                new_subs_text = st.text_area("小カテゴリー (カンマ区切り)", value=", ".join(cat['subs']), key=f"edit_subs_{i}")
+                new_keys_text = st.text_input("同期キーワード (カンマ区切り)", value=", ".join(cat['keywords']), key=f"edit_keys_{i}")
             
-            if st.button("更新", key=f"update_local_{i}"):
-                st.session_state.categories[i] = {
-                    "name": new_name,
-                    "color": new_color,
-                    "subs": [s.strip() for s in new_subs.split(",") if s.strip()],
-                    "keywords": [k.strip() for k in new_keys.split(",") if k.strip()]
-                }
-                st.toast(f"{new_name} を一時更新しました。保存ボタンで確定してください。")
+            if st.button("このカテゴリーを更新", key=f"update_db_{i}"):
+                new_subs = [s.strip() for s in new_subs_text.split(",") if s.strip()]
+                save_category_setting(cat['name'], new_color, new_subs, new_keys_text)
+                st.success(f"{cat['name']} を更新しました。")
+                st.rerun()
 
 # --- MAIN APP ---
 
 def main():
-    # Initial load from sheets if possible
-    if not st.session_state.data_loaded:
-        if 'token' in st.session_state:
-            load_settings_from_sheets()
-            st.session_state.data_loaded = True
-
-    sidebar_auth()
+    sidebar()
     
     tab1, tab2, tab3 = st.tabs(["🚀 記録", "📊 分析", "⚙️ 設定"])
     
@@ -513,7 +350,6 @@ def main():
     with tab3:
         settings_tab()
 
-    # Periodic Rerun if timer is running
     if st.session_state.timer_running:
         time.sleep(1)
         st.rerun()
