@@ -114,8 +114,25 @@ def format_time(seconds):
 
 def get_google_creds():
     """Manage Google OAuth2 credentials."""
+    # Check if secrets exist FIRST to avoid KeyError
+    if "google" not in st.secrets:
+        st.error("🔑 **Secretsが見つかりません**")
+        st.info("""
+        `.streamlit/secrets.toml` (または Streamlit Cloud の Secrets 設定) に以下の情報を追加してください：
+        ```toml
+        [google]
+        client_id = "xxx.apps.googleusercontent.com"
+        client_secret = "GOCSPX-xxxx"
+        ```
+        """)
+        return None
+
+    if "client_id" not in st.secrets["google"] or "client_secret" not in st.secrets["google"]:
+        st.error("🔑 **Secrets のキーが不足しています**")
+        st.write("`client_id` と `client_secret` が正しく設定されているか確認してください。")
+        return None
+
     creds = None
-    # Check if token exists in session state
     if 'token' in st.session_state:
         try:
             creds = Credentials.from_authorized_user_info(json.loads(st.session_state.token))
@@ -126,7 +143,6 @@ def get_google_creds():
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            # Load secrets for OAuth flow
             try:
                 client_config = {
                     "web": {
@@ -140,12 +156,18 @@ def get_google_creds():
                     client_config, 
                     scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/calendar.readonly']
                 )
+                
+                # Check for environment
+                if os.environ.get("STREAMLIT_RUNTIME_ENV") == "cloud":
+                    st.warning("⚠️ **Streamlit Cloud 上では自動認証ブラウザを開けません**")
+                    st.write("ローカル環境で実行するか、Service Account を使用する構成への変更をご検討ください。")
+                    return None
+                
                 creds = flow.run_local_server(port=0)
             except Exception as e:
                 st.error(f"認証エラー: {e}")
                 return None
         
-        # Save token
         st.session_state.token = creds.to_json()
     
     return creds
