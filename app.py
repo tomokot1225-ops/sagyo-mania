@@ -179,9 +179,6 @@ def save_log(entry):
     ''', (entry["Date"], entry["Category"], entry["SubCategory"], entry["Duration"], entry["Memo"], entry["Source"], entry.get("EventID")))
     conn.commit()
     conn.close()
-    # Force reload of logs from DB to clear editor state cache
-    if 'logs_df' in st.session_state:
-        del st.session_state['logs_df']
 
 def update_last_memo(timestamp, memo):
     conn = get_db_connection()
@@ -191,13 +188,11 @@ def update_last_memo(timestamp, memo):
     conn.close()
 
 def load_logs():
-    # Cache to avoid re-calculating if not modified
-    if 'logs_df' not in st.session_state:
-        conn = get_db_connection()
-        df = pd.read_sql_query('SELECT * FROM work_logs ORDER BY timestamp DESC', conn)
-        conn.close()
-        st.session_state.logs_df = df
-    return st.session_state.logs_df
+    """Load logs directly from DB to ensure sync."""
+    conn = get_db_connection()
+    df = pd.read_sql_query('SELECT * FROM work_logs ORDER BY timestamp DESC', conn)
+    conn.close()
+    return df
 
 def delete_log(log_id):
     conn = get_db_connection()
@@ -205,9 +200,6 @@ def delete_log(log_id):
     cursor.execute('DELETE FROM work_logs WHERE id = ?', (log_id,))
     conn.commit()
     conn.close()
-    # Clear cache
-    if 'logs_df' in st.session_state:
-        del st.session_state['logs_df']
 
 def update_log(log_id, category, sub_category, duration, memo, timestamp):
     conn = get_db_connection()
@@ -219,9 +211,6 @@ def update_log(log_id, category, sub_category, duration, memo, timestamp):
     ''', (category, sub_category, duration, memo, timestamp, log_id))
     conn.commit()
     conn.close()
-    # Clear cache
-    if 'logs_df' in st.session_state:
-        del st.session_state['logs_df']
 
 def save_category_setting(name, color, subs, keywords):
     conn = get_db_connection()
@@ -377,15 +366,19 @@ def analysis_tab():
         return
 
     st.subheader("作業履歴の管理")
-    st.caption("💡 表の左端をチェック（複数可）して「🗑️ 選択した記録を削除」を押すか、表の中身を直接編集してください。")
+    st.caption("💡 左端の「削除選択」にチェックを入れて「🗑️ 選択した記録を削除」ボタンを押すと、一括で削除できます。")
     
-    # Selection for deletion and editing
-    # We use st.data_editor to allow both editing and selection
+    # Prepend a 'Selection' column for deletion
+    display_df = df.copy()
+    display_df.insert(0, "削除選択", False)
+    
+    # Use data_editor for CRUD
     edited_df = st.data_editor(
-        df,
+        display_df,
         key="logs_editor",
         use_container_width=True,
         column_config={
+            "削除選択": st.column_config.CheckboxColumn("削除選択", default=False),
             "id": st.column_config.NumberColumn("ID", disabled=True),
             "timestamp": st.column_config.TextColumn("日次 (YYYY-MM-DD HH:MM:SS)"),
             "category": st.column_config.SelectboxColumn("カテゴリー", options=[c['name'] for c in categories]),
@@ -393,104 +386,103 @@ def analysis_tab():
             "source": st.column_config.TextColumn("ソース", disabled=True),
             "event_id": st.column_config.TextColumn("EventID", disabled=True)
         },
-        hide_index=True,
-        on_change=None # We will process deletions/edits via buttons
+        hide_index=True
     )
 
-    # Deletion Flow
-    state = st.session_state.logs_editor
-    deleted_indices = state.get("deleted_rows", [])
+    col_btn1, col_btn2, col_btn3 = st.columns([1.5, 1.5, 2])
     
-    col_c1, col_c2 = st.columns([1, 1])
+    # Identify which rows are checked for deletion in edited_df
+    delete_ids = edited_df[edited_df["削除選択"] == True]["id"].tolist()
     
-    # Handle Deletions explicitly with an alert
-    if deleted_indices:
-        with col_c1:
-            st.warning(f"⚠️ {len(deleted_indices)} 件の記録が削除対象として選択されています。")
-            if st.button("🗑️ 選択した記録を完全に削除する", type="primary", use_container_width=True):
-                for idx in deleted_indices:
-                    log_id = df.iloc[idx]["id"]
-                    delete_log(log_id)
-                st.success("データベースから完全に削除しました。")
+    with col_btn1:
+        if delete_ids:
+            if st.button(f"🗑️ {len(delete_ids)}件を一括削除", type="primary", use_container_width=True):
+                for lid in delete_ids:
+                    delete_log(lid)
+                st.success("完全に削除しました")
+                # Important: clear widget state to avoid stale references
+                if 'logs_editor' in st.session_state:
+                    del st.session_state.logs_editor
                 st.rerun()
-    
-    # Handle Edits
-    edited_rows = state.get("edited_rows", {})
-    if edited_rows:
-        with col_c2:
-            st.info(f"📝 {len(edited_rows)} 件の編集が行われています。")
-            if st.button("💾 編集内容を保存する", type="primary", use_container_width=True):
-                for idx, changes in edited_rows.items():
-                    row = df.iloc[int(idx)]
+        else:
+            st.button("🗑️ 削除（選択なし）", disabled=True, use_container_width=True)
+
+    with col_btn2:
+        # Save Edits handler
+        if st.button("💾 編集内容を保存", use_container_width=True):
+            state = st.session_state.logs_editor
+            edited_rows = state.get("edited_rows", {})
+            if edited_rows:
+                for idx_str, changes in edited_rows.items():
+                    idx = int(idx_str)
+                    row = df.iloc[idx]
                     log_id = row["id"]
                     new_cat = changes.get("category", row["category"])
-                    new_sub = changes.get("sub_category", row["sub_category"])
                     new_dur = changes.get("duration_min", row["duration_min"])
                     new_memo = changes.get("memo", row["memo"])
                     new_time = changes.get("timestamp", row["timestamp"])
+                    new_sub = changes.get("sub_category", row["sub_category"])
                     update_log(log_id, new_cat, new_sub, new_dur, new_memo, new_time)
-                st.success("編集を保存しました。")
+                st.success("保存しました")
+                if 'logs_editor' in st.session_state:
+                    del st.session_state.logs_editor
                 st.rerun()
-    
-    if not deleted_indices and not edited_rows:
-        st.info("💡 表の中で行を削除（Deleteキー）したり編集したりすると、確定ボタンが表示されます。")
+            else:
+                st.info("編集箇所がありません")
+
+    with col_btn3:
         # CSV Export
-        csv = edited_df.to_csv(index=False).encode('utf-8-sig')
+        csv = df.to_csv(index=False).encode('utf-8-sig')
         st.download_button(
-            label="📥 現在のデータをCSV出力",
+            label="📥 全データをCSV出力",
             data=csv,
-            file_name=f'work_logs_{datetime.now().strftime("%Y%m%d")}.csv',
+            file_name=f'work_logs_{get_now_jst().strftime("%Y%m%d")}.csv',
             mime='text/csv',
             use_container_width=True
         )
 
     st.divider()
     
-    # Use edited_df for charts so they update in real-time
+    # Chart section
     color_map = {cat['name']: cat['color'] for cat in categories}
     
     col1, col2 = st.columns([1, 1])
     
     with col1:
         st.subheader("カテゴリー別時間配分")
-        if not edited_df.empty:
-            cat_counts = edited_df.groupby('category')['duration_min'].sum().reset_index()
-            fig_pie = px.pie(
-                cat_counts, values='duration_min', names='category', 
-                hole=.3, color='category', color_discrete_map=color_map
-            )
-            st.plotly_chart(fig_pie, use_container_width=True)
-        else:
-            st.write("データがありません")
+        cat_counts = df.groupby('category')['duration_min'].sum().reset_index()
+        fig_pie = px.pie(
+            cat_counts, values='duration_min', names='category', 
+            hole=.3, color='category', color_discrete_map=color_map
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
         
     with col2:
         st.subheader("稼働推移")
-        view_mode = st.radio("表示単位", ["日次", "週次", "月次"], horizontal=True, label_visibility="collapsed")
+        view_mode = st.radio("表示単位", ["日次", "週次", "月次"], horizontal=True, key="chart_view_mode")
         
-        if not edited_df.empty:
-            edited_df['dt'] = pd.to_datetime(edited_df['timestamp'])
-            if view_mode == "日次":
-                edited_df['Period'] = edited_df['dt'].dt.date
-                xaxis_title = "日付"
-            elif view_mode == "週次":
-                edited_df['Period'] = edited_df['dt'].dt.to_period('W').apply(lambda r: r.start_time.date())
-                xaxis_title = "週 (月曜開始)"
-            else:
-                edited_df['Period'] = edited_df['dt'].dt.to_period('M').apply(lambda r: r.start_time.date())
-                xaxis_title = "月"
-                
-            period_cat = edited_df.groupby(['Period', 'category'])['duration_min'].sum().reset_index()
-            
-            fig_bar = px.bar(
-                period_cat, x='Period', y='duration_min', color='category', 
-                barmode='stack', color_discrete_map=color_map
-            )
-            fig_bar.update_layout(xaxis_title=xaxis_title, yaxis_title="作業時間 (分)")
-            if view_mode == "月次":
-                fig_bar.update_xaxes(dtick="M1", tickformat="%Y-%m")
-            st.plotly_chart(fig_bar, use_container_width=True)
+        df_chart = df.copy()
+        df_chart['dt'] = pd.to_datetime(df_chart['timestamp'])
+        if view_mode == "日次":
+            df_chart['Period'] = df_chart['dt'].dt.date
+            xaxis_title = "日付"
+        elif view_mode == "週次":
+            df_chart['Period'] = df_chart['dt'].dt.to_period('W').apply(lambda r: r.start_time.date())
+            xaxis_title = "週 (月曜開始)"
         else:
-            st.write("データがありません")
+            df_chart['Period'] = df_chart['dt'].dt.to_period('M').apply(lambda r: r.start_time.date())
+            xaxis_title = "月"
+            
+        period_cat = df_chart.groupby(['Period', 'category'])['duration_min'].sum().reset_index()
+        
+        fig_bar = px.bar(
+            period_cat, x='Period', y='duration_min', color='category', 
+            barmode='stack', color_discrete_map=color_map
+        )
+        fig_bar.update_layout(xaxis_title=xaxis_title, yaxis_title="作業時間 (分)")
+        if view_mode == "月次":
+            fig_bar.update_xaxes(dtick="M1", tickformat="%Y-%m")
+        st.plotly_chart(fig_bar, use_container_width=True)
 
 def settings_tab():
     st.title("⚙️ 設定")
