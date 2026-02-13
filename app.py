@@ -519,6 +519,7 @@ def analysis_tab():
             "timestamp": st.column_config.TextColumn("日次 (YYYY-MM-DD HH:MM:SS)"),
             "category": st.column_config.SelectboxColumn("カテゴリー", options=[c['name'] for c in categories]),
             "duration_min": st.column_config.NumberColumn("時間 (分)", min_value=0),
+            "memo": None,
             "source": st.column_config.TextColumn("ソース", disabled=True),
             "event_id": st.column_config.TextColumn("EventID", disabled=True)
         },
