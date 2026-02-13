@@ -344,6 +344,11 @@ def record_tab():
                     if memo and 'last_log_id' in st.session_state:
                         update_memo_by_id(st.session_state.last_log_id, memo)
                         st.toast("メモを保存しました。")
+                    
+                    # Clear cache to force Analysis tab reload
+                    if 'current_df' in st.session_state:
+                        del st.session_state.current_df
+                    
                     st.session_state.show_memo_input = False
                     st.rerun()
             
@@ -362,6 +367,10 @@ def record_tab():
                             "Duration": row["duration_min"], "Memo": row["memo"], "Source": row["source"], "EventID": row["event_id"]
                         }
                         push_to_gsheet(entry)
+                
+                # Clear cache to force Analysis tab reload
+                if 'current_df' in st.session_state:
+                    del st.session_state.current_df
                 
                 st.session_state.show_memo_input = False
                 st.rerun()
@@ -394,6 +403,11 @@ def record_tab():
                     }
                     save_log(entry)
                     st.success("手動記録を保存しました。")
+                    
+                    # Clear cache to force Analysis tab reload
+                    if 'current_df' in st.session_state:
+                        del st.session_state.current_df
+                        
                     st.rerun()
 
     with col2:
