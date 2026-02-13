@@ -493,12 +493,6 @@ def record_tab():
 def analysis_tab():
     st.title("📊 稼働分析")
     
-    webhook_url = load_setting("gsheet_webhook_url")
-    if webhook_url:
-        # Use the specific URL requested by the user
-        target_sheet_url = "https://docs.google.com/spreadsheets/d/1okTU1_zHQYCuq8hBAABqvLjd6IxLbJ3S_D7gGQFmaTY/edit"
-        st.link_button("📂 Googleスプレッドシートを開く", target_sheet_url, type="primary")
-        st.info("💡 データの編集や詳細な分析はスプレッドシート上で行うことをお勧めします。")
     
     # Load logs only once per interaction to avoid index mismatches on rerun
     if 'current_df' not in st.session_state:
