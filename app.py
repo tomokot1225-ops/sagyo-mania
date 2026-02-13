@@ -177,13 +177,15 @@ def save_log(entry):
         INSERT INTO work_logs (timestamp, category, sub_category, duration_min, memo, source, event_id)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     ''', (entry["Date"], entry["Category"], entry["SubCategory"], entry["Duration"], entry["Memo"], entry["Source"], entry.get("EventID")))
+    log_id = cursor.lastrowid
     conn.commit()
     conn.close()
+    return log_id
 
-def update_last_memo(timestamp, memo):
+def update_memo_by_id(log_id, memo):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('UPDATE work_logs SET memo = ? WHERE timestamp = ?', (memo, timestamp))
+    cursor.execute('UPDATE work_logs SET memo = ? WHERE id = ?', (memo, log_id))
     conn.commit()
     conn.close()
 
@@ -273,11 +275,11 @@ def record_tab():
                         "Memo": "",
                         "Source": "Manual"
                     }
-                    save_log(entry)
+                    log_id = save_log(entry)
                     
                     # Update states
                     st.session_state.timer_running = False
-                    st.session_state.last_timestamp = entry["Date"]
+                    st.session_state.last_log_id = log_id
                     st.session_state.show_memo_input = True
                     st.session_state.elapsed_seconds = 0
                     st.rerun()
@@ -289,8 +291,8 @@ def record_tab():
             with st.form("memo_form"):
                 memo = st.text_input("内容を入力（メモを追加）", placeholder="何を行いましたか？")
                 if st.form_submit_button("メモを内容に反映する"):
-                    if memo:
-                        update_last_memo(st.session_state.last_timestamp, memo)
+                    if memo and 'last_log_id' in st.session_state:
+                        update_memo_by_id(st.session_state.last_log_id, memo)
                         st.toast("メモを保存しました。")
                     st.session_state.show_memo_input = False
                     st.rerun()
