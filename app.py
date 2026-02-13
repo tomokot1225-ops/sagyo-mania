@@ -8,6 +8,7 @@ import json
 import sqlite3
 import os
 import pytz
+import requests
 
 # --- TIMEZONE CONFIG ---
 JST = pytz.timezone('Asia/Tokyo')
@@ -66,6 +67,14 @@ def init_db(force=False):
             category_name TEXT,
             name TEXT,
             FOREIGN KEY (category_name) REFERENCES categories (name) ON DELETE CASCADE
+        )
+    ''')
+    
+    # Settings Table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
         )
     ''')
     
@@ -170,6 +179,32 @@ def load_categories():
         })
     return categories
 
+def load_setting(key, default=""):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT value FROM settings WHERE key = ?', (key,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else default
+
+def save_setting(key, value):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', (key, value))
+    conn.commit()
+    conn.close()
+
+def push_to_gsheet(entry):
+    webhook_url = load_setting("gsheet_webhook_url")
+    if not webhook_url:
+        return False
+    try:
+        response = requests.post(webhook_url, json=entry, timeout=10)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"GSheet sync error: {e}")
+        return False
+
 def save_log(entry):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -186,8 +221,23 @@ def update_memo_by_id(log_id, memo):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('UPDATE work_logs SET memo = ? WHERE id = ?', (memo, log_id))
-    conn.commit()
+    
+    # After update, get the full entry to push to GSheet
+    cursor.execute('SELECT * FROM work_logs WHERE id = ?', (log_id,))
+    row = cursor.fetchone()
     conn.close()
+    
+    if row:
+        entry = {
+            "Date": row["timestamp"],
+            "Category": row["category"],
+            "SubCategory": row["sub_category"],
+            "Duration": row["duration_min"],
+            "Memo": row["memo"],
+            "Source": row["source"],
+            "EventID": row["event_id"]
+        }
+        push_to_gsheet(entry)
 
 def load_logs():
     """Load logs directly from DB to ensure sync."""
@@ -298,6 +348,21 @@ def record_tab():
                     st.rerun()
             
             if st.button("メモせず閉じる"):
+                # Push to GSheet with empty memo if skipped
+                if 'last_log_id' in st.session_state:
+                    log_id = st.session_state.last_log_id
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute('SELECT * FROM work_logs WHERE id = ?', (log_id,))
+                    row = cursor.fetchone()
+                    conn.close()
+                    if row:
+                        entry = {
+                            "Date": row["timestamp"], "Category": row["category"], "SubCategory": row["sub_category"],
+                            "Duration": row["duration_min"], "Memo": row["memo"], "Source": row["source"], "EventID": row["event_id"]
+                        }
+                        push_to_gsheet(entry)
+                
                 st.session_state.show_memo_input = False
                 st.rerun()
 
@@ -413,6 +478,11 @@ def record_tab():
 
 def analysis_tab():
     st.title("📊 稼働分析")
+    
+    webhook_url = load_setting("gsheet_webhook_url")
+    if webhook_url:
+        st.link_button("📂 Googleスプレッドシートを開く", "https://docs.google.com/spreadsheets/d/1w-OtkDWHOfbICFpMF-IytmyWTIuXXmvYOCvxuUgq4_s/edit", type="primary")
+        st.info("💡 データの編集や詳細な分析はスプレッドシート上で行うことをお勧めします。")
     
     # Load logs only once per interaction to avoid index mismatches on rerun
     if 'current_df' not in st.session_state:
@@ -596,6 +666,15 @@ def settings_tab():
                 save_category_setting(cat['name'], new_color, new_subs, new_keys_text)
                 st.success(f"{cat['name']} を更新しました。")
                 st.rerun()
+
+    st.divider()
+    st.subheader("🌐 外部連携設定")
+    gsheet_url = load_setting("gsheet_webhook_url")
+    new_gsheet_url = st.text_input("Google Apps Script ウェブアプリ URL", value=gsheet_url, placeholder="https://script.google.com/macros/s/.../exec")
+    if st.button("連携URLを保存"):
+        save_setting("gsheet_webhook_url", new_gsheet_url)
+        st.success("連携URLを保存しました。")
+        st.rerun()
 
 # --- MAIN APP ---
 
