@@ -414,11 +414,19 @@ def record_tab():
 def analysis_tab():
     st.title("📊 稼働分析")
     
-    df = load_logs()
+    # Load logs only once per interaction to avoid index mismatches on rerun
+    if 'current_df' not in st.session_state:
+        st.session_state.current_df = load_logs()
+    df = st.session_state.current_df
+    
     categories = load_categories()
     
     if df.empty:
         st.info("データがありません。作業を記録してください。")
+        if st.button("🔄 再読み込み"):
+            if 'current_df' in st.session_state:
+                del st.session_state.current_df
+            st.rerun()
         return
 
     st.subheader("作業履歴の管理")
@@ -459,6 +467,8 @@ def analysis_tab():
                 # Important: clear widget state to avoid stale references
                 if 'logs_editor' in st.session_state:
                     del st.session_state.logs_editor
+                if 'current_df' in st.session_state:
+                    del st.session_state.current_df
                 st.rerun()
         else:
             st.button("🗑️ 削除（選択なし）", disabled=True, use_container_width=True)
@@ -469,19 +479,35 @@ def analysis_tab():
             state = st.session_state.logs_editor
             edited_rows = state.get("edited_rows", {})
             if edited_rows:
+                success_count = 0
                 for idx_str, changes in edited_rows.items():
                     idx = int(idx_str)
-                    row = df.iloc[idx]
+                    # Use the stable df from session state
+                    row = st.session_state.current_df.iloc[idx]
                     log_id = row["id"]
+                    
+                    # Merge changes with existing values
                     new_cat = changes.get("category", row["category"])
                     new_dur = changes.get("duration_min", row["duration_min"])
                     new_memo = changes.get("memo", row["memo"])
                     new_time = changes.get("timestamp", row["timestamp"])
                     new_sub = changes.get("sub_category", row["sub_category"])
-                    update_log(log_id, new_cat, new_sub, new_dur, new_memo, new_time)
-                st.success("保存しました")
+                    
+                    # Ensure no NaNs go to SQLite
+                    import numpy as np
+                    def clean(val):
+                        if pd.isna(val): return None
+                        return val
+                    
+                    update_log(log_id, clean(new_cat), clean(new_sub), clean(new_dur), clean(new_memo), clean(new_time))
+                    success_count += 1
+                
+                st.success(f"{success_count}件の変更を保存しました")
+                # Clear state to force reload
                 if 'logs_editor' in st.session_state:
                     del st.session_state.logs_editor
+                if 'current_df' in st.session_state:
+                    del st.session_state.current_df
                 st.rerun()
             else:
                 st.info("編集箇所がありません")
