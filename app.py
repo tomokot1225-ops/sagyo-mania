@@ -481,7 +481,9 @@ def analysis_tab():
     
     webhook_url = load_setting("gsheet_webhook_url")
     if webhook_url:
-        st.link_button("📂 Googleスプレッドシートを開く", "https://docs.google.com/spreadsheets/d/1w-OtkDWHOfbICFpMF-IytmyWTIuXXmvYOCvxuUgq4_s/edit", type="primary")
+        # Use the specific URL requested by the user
+        target_sheet_url = "https://docs.google.com/spreadsheets/d/1okTU1_zHQYCuq8hBAABqvLjd6IxLbJ3S_D7gGQFmaTY/edit"
+        st.link_button("📂 Googleスプレッドシートを開く", target_sheet_url, type="primary")
         st.info("💡 データの編集や詳細な分析はスプレッドシート上で行うことをお勧めします。")
     
     # Load logs only once per interaction to avoid index mismatches on rerun
@@ -669,6 +671,34 @@ def settings_tab():
 
     st.divider()
     st.subheader("🌐 外部連携設定")
+    
+    with st.expander("📝 Google Apps Script コード（コピーして使用）"):
+        st.code("""
+function doPost(e) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var data = JSON.parse(e.postData.contents);
+  
+  // Headers if sheet is empty
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(["Timestamp", "Category", "SubCategory", "Duration (min)", "Memo", "Source", "EventID"]);
+  }
+  
+  // Append the data
+  sheet.appendRow([
+    data.Date,
+    data.Category,
+    data.SubCategory,
+    data.Duration,
+    data.Memo,
+    data.Source,
+    data.EventID || ""
+  ]);
+  
+  return ContentService.createTextOutput("Success").setMimeType(ContentService.MimeType.TEXT);
+}
+        """, language="javascript")
+        st.caption("使い方: スプレッドシートの「拡張機能」→「Apps Script」に貼り付けてデプロイしてください。")
+
     gsheet_url = load_setting("gsheet_webhook_url")
     new_gsheet_url = st.text_input("Google Apps Script ウェブアプリ URL", value=gsheet_url, placeholder="https://script.google.com/macros/s/.../exec")
     if st.button("連携URLを保存"):
